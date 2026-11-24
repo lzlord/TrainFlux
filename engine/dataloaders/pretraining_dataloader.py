@@ -1,3 +1,5 @@
+# Modified by TrainFlux.
+
 import os
 import numpy as np
 import torch
@@ -99,8 +101,8 @@ class PretrainingDataLoader:
 
         logger.warning(f'Final shard has only {final_shard_size} tokens, below the {required_tokens} required for one distributed batch. Grouping it with the previous shard.')
 
-    def validate_shards_size(self):
-        required_tokens = self.B * self.S * self.ddp_world_size + 1
+    def validate_shards_size(self, bag_size=1):
+        required_tokens = (self.B * self.S * self.ddp_world_size + 1) * bag_size
 
         for shard in self.shards:
             shard_len = self.get_shard_size(shard)
@@ -178,44 +180,41 @@ class PretrainingDataLoader:
             self.tokens = self.tokens.pin_memory()
         self.current_position = state['current_position']
 
-    def next_batch(self):
-        B, S = self.B, self.S
-        local_batch_tokens = B * S
+    def advance_shard(self):
+        self.current_shard = (self.current_shard + 1) % len(self.shards)
+        if self.current_shard == 0:
+            self.sync_shuffle_shards()
+        self.tokens = self.load_shard(self.shards[self.current_shard])
+        if torch.cuda.is_available():
+            self.tokens = self.tokens.pin_memory()
+        self.current_position = 0
+
+    def next_batch(self, bag_size=1):
+        local_batch_tokens = self.B * self.S * bag_size
         global_batch_tokens = local_batch_tokens * self.ddp_world_size
 
-        # current_position is global and equal on all ranks. (same starting point reference)
+        if bag_size > 1 and self.current_position + global_batch_tokens + bag_size > len(self.tokens):
+            self.advance_shard()
+
+        # All ranks share the cursor and use disjoint input windows.
         rank_position = self.current_position + local_batch_tokens * self.ddp_rank
-
-        buf = self.tokens[rank_position : rank_position + local_batch_tokens + 1]
-
-        if len(buf) != local_batch_tokens + 1:
+        needed = local_batch_tokens + bag_size
+        buf = self.tokens[rank_position : rank_position + needed]
+        if len(buf) != needed:
             raise RuntimeError(
                 f'Invalid batch slice on rank {self.ddp_rank}: '
                 f'global_position={self.current_position}, '
-                f'rank_position={rank_position}, '
-                f'needed={local_batch_tokens + 1}, '
-                f'got={len(buf)}, '
-                f'shard={self.current_shard}, '
-                f'shard_len={len(self.tokens)}'
+                f'rank_position={rank_position}, needed={needed}, got={len(buf)}, '
+                f'shard={self.current_shard}, shard_len={len(self.tokens)}'
             )
 
-        x = (buf[:-1]).view(B, S)
-        y = (buf[1:]).view(B, S)
-
+        shape = (self.B, self.S, bag_size) if bag_size > 1 else (self.B, self.S)
+        x = buf[:-bag_size].view(shape)
+        y = buf[bag_size:].view(shape)
         self.current_position += global_batch_tokens
 
-        # If needed to change shard, all ranks change.
-        if self.current_position + global_batch_tokens + 1 > len(self.tokens):
-            self.current_shard = (self.current_shard + 1) % len(self.shards)
+        # Keep any remaining full standard batches available for recovery.
+        if self.current_position + self.B * self.S * self.ddp_world_size + 1 > len(self.tokens):
+            self.advance_shard()
 
-            if self.current_shard == 0:
-                self.sync_shuffle_shards()
-
-            self.tokens = self.load_shard(self.shards[self.current_shard])
-            if torch.cuda.is_available():
-                self.tokens = self.tokens.pin_memory()
-
-            self.current_position = 0
-
-        # None here is because we dont need attention mask.
         return x, y, None

@@ -1,3 +1,5 @@
+# Modified by TrainFlux.
+
 import math
 import torch
 import torch.distributed as dist
@@ -48,6 +50,7 @@ from engine.torch_profiler import (
     init_torch_profiler_context
 )
 from engine.snapshot import create_run_snapshot
+from engine.token_superposition import SuperpositionSchedule
 from engine.distributed import (
     init_multi_gpu,
     prepare_model_for_ddp,
@@ -135,6 +138,7 @@ class Trainer:
         self.workload_summary = None
         self.wandb = None
         self.torch_profiler_context = None
+        self.superposition = SuperpositionSchedule(config.training.token_superposition)
 
         self.validate_common_config()
 
@@ -162,6 +166,23 @@ class Trainer:
 
     def validate_common_config(self):
         config = self.config
+        tst = config.training.token_superposition
+        if tst.mode != 'standard':
+            if (
+                config.training.stage != TrainingStage.PRETRAINING
+                or config.model.architecture != ModelArchitecture.TENDRIL
+                or config.distillation.enabled
+            ):
+                raise ValueError('TST requires dense Tendril pretraining without distillation')
+            if config.training.max_steps <= 0:
+                raise ValueError('TST requires an explicit training.max_steps')
+        if tst.mode == 'adaptive':
+            if tst.min_superposition_steps > tst.max_superposition_steps:
+                raise ValueError('TST minimum cannot exceed the maximum superposition steps')
+            if config.validation.every_x_steps <= 0 or (
+                config.validation.validation_steps != -1 and config.validation.validation_steps < 1
+            ):
+                raise ValueError('Adaptive TST requires periodic validation with at least one batch')
 
         # device type
         if self.config.runtime.device_type not in (DeviceType.CPU, DeviceType.CUDA):
@@ -527,6 +548,8 @@ class Trainer:
             number_of_cpu_processes=self.config.runtime.number_of_cpu_processes,
             ignore_index=self.config.tokenizer.ignore_index
         )
+        if self.superposition.bag_size > 1:
+            self.train_loader.validate_shards_size(self.superposition.bag_size)
 
     def resolve_checkpoint_request(self):
         if self.args.checkpoint is None:
@@ -597,6 +620,11 @@ class Trainer:
                 checkpoint_data.last_val_loss = float('inf')
                 checkpoint_data.best_val_loss = float('inf')
         
+        saved_superposition = checkpoint_data.metadata.get('token_superposition')
+        if self.superposition.config.mode != 'standard' and saved_superposition:
+            self.superposition.load_state_dict(
+                saved_superposition, reset_validation_history=reset_validation_history
+            )
         self.checkpoint_data = checkpoint_data
 
     def apply_lora_modification(self):
@@ -1053,6 +1081,10 @@ class Trainer:
         return grad_scale
 
     def run_train(self, pbar):
+        decision = self.superposition.prepare_step(self.trainer_state.current_step)
+        if decision:
+            logger.info(f'TST | {decision}', pbar=pbar)
+        bag_size = self.superposition.bag_size
         ddp = self.trainer_ctx.distributed.ddp
         ddp_local_rank = self.trainer_ctx.distributed.ddp_local_rank
         use_fsdp = self.trainer_ctx.distributed.use_fsdp
@@ -1078,7 +1110,8 @@ class Trainer:
             t0 = time.perf_counter()
 
         for micro_step in range(grad_accum_steps):
-            output = self.task.train_micro_step(self.model, self.train_loader.next_batch(), self.task_assets)
+            batch = self.train_loader.next_batch(bag_size=bag_size) if bag_size > 1 else self.train_loader.next_batch()
+            output = self.task.train_micro_step(self.model, batch, self.task_assets)
             tokens_processed_sum += output.tokens_processed
             n_valid_sum += output.n_valid.to(device=device, dtype=torch.float32)
             loss_for_backward = output.loss_for_backward
@@ -1175,6 +1208,8 @@ class Trainer:
         validation_steps = self.config.validation.validation_steps
         if validation_steps == -1:
             validation_steps = len(self.val_loader)
+        if self.superposition.config.mode == 'adaptive':
+            self.val_loader.reset()
 
         for _ in tqdm(range(validation_steps), 'Validating', disable=not is_master_process, leave=False):
             output = self.task.validation_step(self.model, self.val_loader.next_batch(), self.task_assets)
@@ -1224,6 +1259,11 @@ class Trainer:
             metrics_weights_acc=metrics_weights_acc,
             ddp=ddp
         )
+        if self.superposition.config.mode == 'adaptive' and self.superposition.bag_size > 1:
+            decision = self.superposition.observe_validation(
+                self.trainer_state.current_step + 1, float(aggregated_metrics['Val CE Loss'])
+            )
+            console_logs.append(f'TST | {decision}')
         model_specific_metrics = self.collect_model_specific_metrics()
         self.log_step_metrics(
             step_metrics=step_metrics,
@@ -1236,6 +1276,14 @@ class Trainer:
         return save_best_checkpoint
 
     def run_save_checkpoint(self, *, path, max_number_checkpoints, pbar):
+        metadata = {
+            'training_stage': self.config.training.stage.value,
+            'lora_enabled': self.config.lora.enabled,
+            'ddp_world_size': self.distributed_ctx.ddp_world_size,
+            'wandb_run_id': self.wandb.run_id,
+        }
+        if self.superposition.config.mode != 'standard':
+            metadata['token_superposition'] = self.superposition.state_dict()
         save_checkpoint(
             path,
             get_model(self.model),
@@ -1246,12 +1294,7 @@ class Trainer:
             self.optimizers,
             self.train_loader,
             self.val_loader,
-            {
-                'training_stage': self.config.training.stage.value,
-                'lora_enabled': self.config.lora.enabled,
-                'ddp_world_size': self.distributed_ctx.ddp_world_size,
-                'wandb_run_id': self.wandb.run_id
-            },
+            metadata,
             max_number_checkpoints,
             self.distributed_ctx.is_master_process,
             pbar=pbar

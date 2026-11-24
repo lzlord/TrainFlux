@@ -1,3 +1,5 @@
+# Modified by TrainFlux.
+
 import math
 import torch
 import torch.nn.functional as F
@@ -280,6 +282,10 @@ class TendrilTransformer(BaseModel):
         sequence_length = input_ids.shape[1]
 
         hidden_state = self.tok_embeddings(input_ids)
+        if input_ids.ndim == 3:
+            if attention_mask is not None or kv_cache is not None or labels is not None:
+                raise ValueError('Tendril bag inputs require the unmasked pretraining logits path')
+            hidden_state = hidden_state.mean(dim=2)
 
         rope_freqs = self.rope_freqs
         if rope_freqs.device != hidden_state.device or rope_freqs.dtype != hidden_state.dtype:

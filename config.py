@@ -1,3 +1,5 @@
+# Modified by TrainFlux.
+
 import os
 import yaml
 
@@ -85,6 +87,16 @@ class TrainingStage(str, Enum):
     INSTRUCT = 'instruct'
     DPO = 'dpo'
 
+class TokenSuperpositionConfig(BaseModel):
+    model_config = ConfigDict(extra='forbid', allow_inf_nan=False)
+    mode: Literal['standard', 'fixed', 'adaptive'] = 'standard'
+    bag_size: int = Field(default=2, ge=2)
+    switch_step: int = Field(default=100, ge=1)
+    min_superposition_steps: int = Field(default=20, ge=1)
+    max_superposition_steps: int = Field(default=200, ge=1)
+    patience: int = Field(default=3, ge=1)
+    min_delta: float = Field(default=0.01, ge=0)
+
 class TrainingConfig(BaseModel):
     model_config = ConfigDict(extra='forbid')
     stage: TrainingStage = TrainingStage.PRETRAINING
@@ -95,6 +107,7 @@ class TrainingConfig(BaseModel):
     max_steps_per_run: int | None = Field(default=None, gt=0)
     early_stopping_patience: int = 100
     early_stopping_patience_skip_steps: int = 0
+    token_superposition: TokenSuperpositionConfig = Field(default_factory=TokenSuperpositionConfig)
 
 class EvalTaskConfig(BaseModel):
     model_config = ConfigDict(extra='forbid')
