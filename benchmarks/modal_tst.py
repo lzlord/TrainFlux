@@ -28,12 +28,12 @@ BUDGET = 1.0
 TORCH_IMAGE = 'pytorch/pytorch:2.10.0-cuda12.8-cudnn9-runtime'
 
 
-def reserve_trial():
+def reserve_trial(name):
     LEDGER.mkdir(parents=True, exist_ok=True)
     for slot in range(int(BUDGET / MAX_RUN_COST)):
         try:
             with (LEDGER / f'{slot}.json').open('x', encoding='utf-8') as handle:
-                json.dump({'max_usd': MAX_RUN_COST, 'timeout': SANDBOX_TIMEOUT}, handle)
+                json.dump({'trial': name, 'max_usd': MAX_RUN_COST, 'timeout': SANDBOX_TIMEOUT}, handle)
             return
         except FileExistsError:
             continue
@@ -60,7 +60,21 @@ def run_trial(app, image, output, mode, budget):
     if result_path.exists():
         print(f'{name}: already complete', flush=True)
         return
-    reserve_trial()
+    lock = output / f'.{name}.lock'
+    try:
+        lock.touch(exist_ok=False)
+    except FileExistsError as exc:
+        raise RuntimeError(f'{name} already has a launcher reservation: {lock}') from exc
+    try:
+        if not result_path.exists():
+            run_reserved_trial(app, image, output, mode, budget, result_path)
+    finally:
+        lock.unlink()
+
+
+def run_reserved_trial(app, image, output, mode, budget, result_path):
+    name = f'{budget}-{mode}'
+    reserve_trial(name)
     print(f'{name}: reserved up to ${MAX_RUN_COST:.4f}', flush=True)
     sandbox = modal.Sandbox.create(
         'bash', '-c', 'exec timeout --kill-after=5s "$@" 2>&1',
