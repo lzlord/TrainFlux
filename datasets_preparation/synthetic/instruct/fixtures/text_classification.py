@@ -1,0 +1,307 @@
+TEXT_CLASSIFICATION_FIXTURES = {
+    'sentiment': {
+        'messages': [
+            {
+                'role': 'user',
+                'content': [
+                    'Classify the sentiment as positive, negative, or neutral:\n{text}\nOnly provide the label.',
+                    'Classify the sentiment as positive, negative, or neutral:\n{text}',
+                    'What is the sentiment of this text? Choose positive, negative, or neutral:\n{text}\nOnly provide the label.',
+                    'Label the sentiment as positive, negative, or neutral:\n{text}\nOnly output the label.',
+                    'Return one lowercase sentiment label: positive, negative, or neutral.\n{text}',
+                    'Choose the correct sentiment label for this text: positive, negative, or neutral.\n{text}\nOnly provide the label.',
+                ],
+            },
+            {
+                'role': 'assistant',
+                'content': '{answer}',
+            },
+        ],
+        'examples': [
+            {'text': 'I loved the movie.', 'answer': 'positive'},
+            {
+                'text': 'That was a wonderful surprise.',
+                'answer': 'positive',
+            },
+            {'text': 'This cake tastes amazing.', 'answer': 'positive'},
+            {'text': 'I really enjoyed the concert.', 'answer': 'positive'},
+            {
+                'text': 'The team did a fantastic job.',
+                'answer': 'positive',
+            },
+            {'text': 'I am happy with the result.', 'answer': 'positive'},
+            {'text': 'The service was excellent.', 'answer': 'positive'},
+            {'text': 'The book was fun to read.', 'answer': 'positive'},
+            {
+                'text': 'She gave a great presentation.',
+                'answer': 'positive',
+            },
+            {'text': 'The app works perfectly now.', 'answer': 'positive'},
+            {'text': 'I had a lovely afternoon.', 'answer': 'positive'},
+            {'text': 'The food was delicious.', 'answer': 'positive'},
+            {'text': 'The package arrived yesterday.', 'answer': 'neutral'},
+            {'text': 'The meeting starts at noon.', 'answer': 'neutral'},
+            {'text': 'The book is on the table.', 'answer': 'neutral'},
+            {'text': 'The train leaves at 8:30.', 'answer': 'neutral'},
+            {'text': 'The report has three sections.', 'answer': 'neutral'},
+            {'text': 'The door is closed.', 'answer': 'neutral'},
+            {'text': 'She walked to the store.', 'answer': 'neutral'},
+            {'text': 'The laptop is on the desk.', 'answer': 'neutral'},
+            {'text': 'The class begins tomorrow.', 'answer': 'neutral'},
+            {
+                'text': 'The package weighs two kilograms.',
+                'answer': 'neutral',
+            },
+            {
+                'text': 'The event is scheduled for Friday.',
+                'answer': 'neutral',
+            },
+            {'text': 'The car is parked outside.', 'answer': 'neutral'},
+            {
+                'text': 'The service was slow and rude.',
+                'answer': 'negative',
+            },
+            {
+                'text': 'I am disappointed with the result.',
+                'answer': 'negative',
+            },
+            {'text': 'The app keeps crashing.', 'answer': 'negative'},
+            {'text': 'The food tasted awful.', 'answer': 'negative'},
+            {
+                'text': 'The movie was boring and too long.',
+                'answer': 'negative',
+            },
+            {'text': 'I hated the ending.', 'answer': 'negative'},
+            {'text': 'The room was dirty.', 'answer': 'negative'},
+            {
+                'text': 'The instructions were confusing.',
+                'answer': 'negative',
+            },
+            {
+                'text': 'The product broke after one day.',
+                'answer': 'negative',
+            },
+            {'text': 'The waiter was unhelpful.', 'answer': 'negative'},
+            {
+                'text': 'The experience was frustrating.',
+                'answer': 'negative',
+            },
+            {'text': 'The answer was wrong.', 'answer': 'negative'},
+            {
+                'text': (
+                    'I loved the music but the seats were uncomfortable.'
+                ),
+                'answer': 'neutral',
+            },
+            {
+                'text': 'The food was good, but the service was slow.',
+                'answer': 'neutral',
+            },
+            {
+                'text': 'The hotel was clean, but the room was noisy.',
+                'answer': 'neutral',
+            },
+            {
+                'text': (
+                    'The app is useful, although it sometimes crashes.'
+                ),
+                'answer': 'neutral',
+            },
+            {
+                'text': 'The movie had great acting but a weak story.',
+                'answer': 'neutral',
+            },
+            {
+                'text': 'The meeting was long, but we finished the plan.',
+                'answer': 'neutral',
+            },
+        ],
+    },
+    'topic': {
+        'messages': [
+            {
+                'role': 'user',
+                'content': [
+                    'Classify the topic as food, travel, sports, or technology:\n{text}\nOnly provide the label.',
+                    'Classify the topic as food, travel, sports, or technology:\n{text}',
+                    'What topic is this text about? Choose food, travel, sports, or technology:\n{text}\nOnly provide the label.',
+                    'Label the topic as food, travel, sports, or technology:\n{text}\nOnly output the label.',
+                    'Return one lowercase topic label: food, travel, sports, or technology.\n{text}',
+                    'Choose the correct topic label for this text: food, travel, sports, or technology.\n{text}\nOnly provide the label.',
+                ],
+            },
+            {
+                'role': 'assistant',
+                'content': '{answer}',
+            },
+        ],
+        'examples': [
+            {
+                'text': 'The laptop battery charges quickly.',
+                'answer': 'technology',
+            },
+            {
+                'text': 'The phone screen is very bright.',
+                'answer': 'technology',
+            },
+            {
+                'text': 'The software update fixed the bug.',
+                'answer': 'technology',
+            },
+            {
+                'text': 'The keyboard stopped working.',
+                'answer': 'technology',
+            },
+            {
+                'text': 'The website loads in two seconds.',
+                'answer': 'technology',
+            },
+            {
+                'text': 'The camera uses a new sensor.',
+                'answer': 'technology',
+            },
+            {
+                'text': 'The robot can follow simple commands.',
+                'answer': 'technology',
+            },
+            {
+                'text': 'The database stores customer records.',
+                'answer': 'technology',
+            },
+            {'text': 'The team won the final match.', 'answer': 'sports'},
+            {'text': 'The player scored two goals.', 'answer': 'sports'},
+            {'text': 'The coach changed the lineup.', 'answer': 'sports'},
+            {
+                'text': 'The runner finished the race quickly.',
+                'answer': 'sports',
+            },
+            {
+                'text': 'The goalkeeper saved the penalty.',
+                'answer': 'sports',
+            },
+            {'text': 'The match ended in a draw.', 'answer': 'sports'},
+            {'text': 'The swimmer broke the record.', 'answer': 'sports'},
+            {
+                'text': 'The fans cheered after the goal.',
+                'answer': 'sports',
+            },
+            {'text': 'The soup needs more salt.', 'answer': 'food'},
+            {'text': 'The pasta is ready to serve.', 'answer': 'food'},
+            {
+                'text': 'The bread is fresh from the oven.',
+                'answer': 'food',
+            },
+            {
+                'text': 'The cake has chocolate frosting.',
+                'answer': 'food',
+            },
+            {
+                'text': 'The salad includes tomatoes and lettuce.',
+                'answer': 'food',
+            },
+            {
+                'text': 'The rice cooked for twenty minutes.',
+                'answer': 'food',
+            },
+            {
+                'text': 'The sandwich has cheese and tomato.',
+                'answer': 'food',
+            },
+            {'text': 'The coffee tastes strong.', 'answer': 'food'},
+            {
+                'text': 'The train arrived in Lisbon.',
+                'answer': 'travel',
+            },
+            {
+                'text': 'The flight leaves early tomorrow.',
+                'answer': 'travel',
+            },
+            {
+                'text': 'The hotel room has a sea view.',
+                'answer': 'travel',
+            },
+            {
+                'text': 'The bus stopped near the museum.',
+                'answer': 'travel',
+            },
+            {
+                'text': 'The tourist visited three cities.',
+                'answer': 'travel',
+            },
+            {
+                'text': 'The passport was checked at the airport.',
+                'answer': 'travel',
+            },
+            {
+                'text': 'The map shows the route to Madrid.',
+                'answer': 'travel',
+            },
+            {
+                'text': 'The ferry crosses the river every hour.',
+                'answer': 'travel',
+            },
+        ],
+    },
+    'yes_no_question_type': {
+        'messages': [
+            {
+                'role': 'user',
+                'content': [
+                    'Classify this question as yes_no or open_ended:\n{text}\nOnly provide the label.',
+                    'Is this question yes_no or open_ended?\n{text}\nOnly output the label.',
+                    'Return one label for the question type: yes_no or open_ended.\n{text}',
+                    'Choose the question type: yes_no or open_ended.\n{text}\nOnly provide the label.',
+                ],
+            },
+            {
+                'role': 'assistant',
+                'content': '{answer}',
+            },
+        ],
+        'examples': [
+            {
+                'text': 'Is Paris the capital of France?',
+                'answer': 'yes_no',
+            },
+            {'text': 'Do you like apples?', 'answer': 'yes_no'},
+            {'text': 'Can birds fly?', 'answer': 'yes_no'},
+            {'text': 'Are you ready?', 'answer': 'yes_no'},
+            {'text': 'Did the train arrive?', 'answer': 'yes_no'},
+            {'text': 'Is water wet?', 'answer': 'yes_no'},
+            {'text': 'Should we start now?', 'answer': 'yes_no'},
+            {'text': 'Will it rain today?', 'answer': 'yes_no'},
+            {
+                'text': 'What is the capital of Spain?',
+                'answer': 'open_ended',
+            },
+            {
+                'text': 'How do plants grow?',
+                'answer': 'open_ended',
+            },
+            {
+                'text': 'Why is the sky blue?',
+                'answer': 'open_ended',
+            },
+            {
+                'text': 'Where did Maria go?',
+                'answer': 'open_ended',
+            },
+            {
+                'text': 'When does the meeting start?',
+                'answer': 'open_ended',
+            },
+            {
+                'text': 'Who wrote Romeo and Juliet?',
+                'answer': 'open_ended',
+            },
+            {
+                'text': 'How can I make tea?',
+                'answer': 'open_ended',
+            },
+            {
+                'text': 'What should I bring?',
+                'answer': 'open_ended',
+            },
+        ],
+    },
+}

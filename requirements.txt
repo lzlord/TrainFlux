@@ -1,0 +1,13 @@
+pyyaml
+pytest
+pyarrow
+numpy
+tqdm
+pydantic
+pydantic-settings
+torch
+datasets
+huggingface_hub
+transformers
+wandb
+gradio

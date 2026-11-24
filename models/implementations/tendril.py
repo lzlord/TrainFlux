@@ -1,0 +1,347 @@
+import math
+import torch
+import torch.nn.functional as F
+
+from torch import nn
+from models.base import BaseModel
+from inference.kv_cache import KVCache
+from config import ModelConfig
+
+
+def precompute_rope_freqs(head_dim, sequence_length, theta=10000.0, device='cpu', dtype=torch.float32):
+    ''' Computes the frequencies that will be used for rope (rotary positional ebedding). Without complex numbers.
+    '''
+    indices = torch.arange(0, head_dim // 2, device=device, dtype=torch.float32)
+    normalized_indices = 2.0 * indices / head_dim
+
+    freqs = 1.0 / (theta ** normalized_indices)
+
+    timesteps = torch.arange(sequence_length, device=device, dtype=torch.float32)
+
+    freqs = torch.outer(timesteps, freqs)
+
+    cos = torch.cos(freqs).repeat_interleave(2, dim=-1).to(dtype)
+    sin = torch.sin(freqs).repeat_interleave(2, dim=-1).to(dtype)
+
+    freqs_sin_cos = torch.stack((cos, sin), dim=-1)
+
+    return freqs_sin_cos
+
+def rotate_half(x):
+    ''' 90 degree rotation
+    '''
+    # get pairs
+    x1 = x[..., ::2]
+    x2 = x[..., 1::2]
+    # rotates the pairs like if we multiplied a rotating matrix ([[0, -1], [1, 0]]) by a vector [x, y]
+    rotated = torch.stack((-x2, x1), dim=-1)
+    return rotated.flatten(-2) # returns flat tensor with all pairs
+
+def apply_rope(xq, xk, freqs):
+    ''' Apply the rotary position embeddings. Without complex numbers.
+        freqs is expected to have dimension [sequence_length, head_dim, 2]
+    '''
+    cos = freqs[..., 0][None, :, None, :] # will have dim (1, sequence_length, 1, model_dim)
+    sin = freqs[..., 1][None, :, None, :]
+
+    xq = (xq * cos) + rotate_half(xq) * sin
+    xk = (xk * cos) + rotate_half(xk) * sin
+
+    return xq, xk
+
+def repeat_kv(x, n_rep):
+    ''' Repeat x n_rep times. The idea is to spread these tensors through more attention heads. 
+    '''
+    bs, slen, n_kv_heads, head_dim = x.shape
+
+    if n_rep == 1:
+        return x
+        
+    return (
+        x[:, :, :, None, :]
+        .expand(bs, slen, n_kv_heads, n_rep, head_dim)
+        .reshape(bs, slen, n_kv_heads * n_rep, head_dim)
+    )
+
+class Attention(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.n_heads = config.n_heads
+        self.n_kv_heads = config.n_heads if config.n_kv_heads is None else config.n_kv_heads
+        self.head_dim = config.dim // config.n_heads
+
+        self.wq = nn.Linear(config.dim, config.n_heads * self.head_dim, bias=False)
+        self.wk = nn.Linear(config.dim, self.n_kv_heads * self.head_dim, bias=False)
+        self.wv = nn.Linear(config.dim, self.n_kv_heads * self.head_dim, bias=False)
+        self.wo = nn.Linear(config.n_heads * self.head_dim, config.dim, bias=False)
+
+    def forward(self, x, rope_freqs, attn_mask=None, layer_k_cache=None, layer_v_cache=None, start_position: int = 0):
+        batch_size, sequence_length, _ = x.shape
+        xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)
+
+        xq = xq.view(batch_size, sequence_length, self.n_heads, self.head_dim)
+        xk = xk.view(batch_size, sequence_length, self.n_kv_heads, self.head_dim)
+        xv = xv.view(batch_size, sequence_length, self.n_kv_heads, self.head_dim)
+
+        xq, xk = apply_rope(xq, xk, freqs=rope_freqs)
+
+        # KV cache
+        kv_cache = layer_k_cache is not None and layer_v_cache is not None
+        if kv_cache:
+            end_position = start_position + sequence_length
+            layer_k_cache[:batch_size, start_position : end_position].copy_(xk)
+            layer_v_cache[:batch_size, start_position : end_position].copy_(xv)
+
+            xk = layer_k_cache[:batch_size, :end_position]
+            xv = layer_v_cache[:batch_size, :end_position]
+
+        keys = repeat_kv(xk, self.n_heads // self.n_kv_heads)
+        values = repeat_kv(xv, self.n_heads // self.n_kv_heads)
+
+        xq = xq.transpose(1, 2)
+        keys = keys.transpose(1, 2)
+        values = values.transpose(1, 2)
+
+        # triangular mask toggle for torch SDPA
+        if attn_mask is not None:
+            is_causal = False
+        else:
+            if not kv_cache:
+                is_causal = True
+            else:
+                is_causal = (start_position == 0) # 0 means prefill in this scenario
+
+        # scores = torch.matmul(xq, keys.transpose(2, 3)) / math.sqrt(self.head_dim)
+        # if mask is not None:
+        #     scores = scores + mask
+        # scores = F.softmax(scores.float(), dim=-1).type_as(xq)
+        # output = torch.matmul(scores, values)
+
+        # Torch scaled_dot_product_attention will use flash-attention if possible.
+        output = F.scaled_dot_product_attention(
+            xq,
+            keys,
+            values,
+            attn_mask=attn_mask,
+            is_causal=is_causal
+        )
+
+        output = output.transpose(1, 2).contiguous().view(batch_size, sequence_length, -1)
+
+        return self.wo(output)
+
+class FeedForward(nn.Module):
+    def __init__(self, dim, hidden_dim, multiple_of, ffn_dim_multiplier):
+        super().__init__()
+        hidden_dim = int(2 * hidden_dim / 3)
+        if ffn_dim_multiplier is not None:
+            hidden_dim = int(ffn_dim_multiplier * hidden_dim)
+        hidden_dim = multiple_of * ((hidden_dim + multiple_of - 1) // multiple_of)
+
+        self.w1 = nn.Linear(dim, hidden_dim, bias=False)
+        self.w2 = nn.Linear(hidden_dim, dim, bias=False)
+        self.w3 = nn.Linear(dim, hidden_dim, bias=False)
+
+    def forward(self, x):
+        a, b = self.w1(x), self.w3(x)
+        c = F.silu(a) * b
+        return self.w2(c)
+
+class RMSNorm(nn.Module):
+    def __init__(self, dim, eps=1e-6):
+        super().__init__()
+        self.eps = eps
+        self.weight = nn.Parameter(torch.ones(dim))
+
+    def forward(self, x):
+        input_dtype = x.dtype
+        x_float = x.float()
+        normed = x_float * torch.rsqrt(
+            x_float.pow(2).mean(-1, keepdim=True) + self.eps
+        )
+        return (normed * self.weight.float()).to(input_dtype)
+
+class TransformerBlock(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.n_heads = config.n_heads
+        self.dim = config.dim
+        self.attention = Attention(config)
+        self.feed_forward = FeedForward(
+            dim=config.dim,
+            hidden_dim=4 * config.dim,
+            multiple_of=config.multiple_of,
+            ffn_dim_multiplier=config.ffn_dim_multiplier
+        )
+        self.attention_norm = RMSNorm(config.dim, eps=config.norm_eps)
+        self.ffn_norm = RMSNorm(config.dim, eps=config.norm_eps)
+
+    def forward(self, x, rope_freqs, mask=None, layer_k_cache=None, layer_v_cache=None, start_position: int = 0):
+        hidden_state = x + self.attention(
+            self.attention_norm(x),
+            rope_freqs,
+            mask,
+            layer_k_cache=layer_k_cache,
+            layer_v_cache=layer_v_cache,
+            start_position=start_position
+        )
+        output = hidden_state + self.feed_forward(self.ffn_norm(hidden_state))
+        return output
+
+class TendrilTransformer(BaseModel):
+    def __init__(
+        self,
+        *,
+        config: ModelConfig,
+        pad_token_id,
+        vocab_size,
+        ignore_index
+    ):
+        super().__init__(
+            config=config,
+            pad_token_id=pad_token_id,
+            vocab_size=vocab_size,
+            ignore_index=ignore_index
+        )
+
+        self.n_layers = config.n_layers
+
+        self.tok_embeddings = nn.Embedding(
+            self.vocab_size,
+            config.dim,
+            padding_idx=self.pad_token_id
+        )
+
+        self.layers = nn.ModuleList()
+        for _ in range(self.n_layers):
+            self.layers.append(TransformerBlock(config))
+
+        self.norm = RMSNorm(config.dim, eps=config.norm_eps)
+        self.output = nn.Linear(config.dim, self.vocab_size, bias=False)
+
+        rope_freqs = precompute_rope_freqs(
+            config.dim // config.n_heads,
+            config.max_seq_len * 2,
+            config.rope_theta
+        )
+
+        self.register_buffer('rope_freqs', rope_freqs, persistent=False)
+
+        self.init_model_weights()
+
+        if config.tied_embeddings:
+            self.output.weight = self.tok_embeddings.weight
+
+    def init_model_weights(self):
+        default_std = 0.02
+        residual_std = default_std / math.sqrt(2 * self.config.n_layers)
+
+        for name, module in self.named_modules():
+            if isinstance(module, nn.Embedding):
+                nn.init.normal_(module.weight, mean=0.0, std=default_std)
+                if module.padding_idx is not None:
+                    with torch.no_grad():
+                        module.weight[module.padding_idx].zero_()
+
+            elif isinstance(module, nn.Linear):
+                std = default_std
+                if name.endswith('attention.wo') or name.endswith('feed_forward.w2'):
+                    std = residual_std
+
+                nn.init.normal_(module.weight, mean=0.0, std=std)
+
+    @classmethod
+    def validate_config(cls, config: ModelConfig):
+        if config.dim % config.n_heads != 0:
+            raise ValueError(f'"dim" ({config.dim}) must be divisible by "n_heads" ({config.n_heads})')
+        if config.n_kv_heads > config.n_heads:
+            raise ValueError(f'"n_kv_heads" ({config.n_kv_heads}) must be less or equal to "n_heads" ({config.n_heads})')
+        if config.n_heads % config.n_kv_heads != 0:
+            raise ValueError(f'"n_heads" ({config.n_heads}) must be divisible by "n_kv_heads" ({config.n_kv_heads})')
+
+    @classmethod
+    def supported_lora_target_modules(cls) -> set[str]:
+        return set(['wq', 'wk', 'wv', 'wo', 'w1', 'w2', 'w3'])
+
+    def get_input_embeddings(self):
+        return self.tok_embeddings
+
+    def get_output_embeddings(self):
+        return self.output
+
+    def forward(
+        self,
+        input_ids,
+        attention_mask=None,
+        start_position=0,
+        labels=None,
+        kv_cache: KVCache = None
+    ):
+        sequence_length = input_ids.shape[1]
+
+        hidden_state = self.tok_embeddings(input_ids)
+
+        rope_freqs = self.rope_freqs
+        if rope_freqs.device != hidden_state.device or rope_freqs.dtype != hidden_state.dtype:
+            rope_freqs = rope_freqs.to(
+                dtype=hidden_state.dtype,
+                device=hidden_state.device
+            )
+
+        rope_freqs = rope_freqs[start_position : start_position + sequence_length]
+
+        if kv_cache is not None and start_position > 0 and sequence_length != 1:
+            raise ValueError('current kv cache only supports 1 token decoding')
+
+        attn_mask = None
+        if attention_mask is not None:
+            attention_mask = attention_mask.to(hidden_state.device)
+
+            # adjust K length for the mask when using kv_cache
+            k_length = start_position + sequence_length if kv_cache is not None else sequence_length
+            attention_mask = attention_mask[:, :k_length]
+
+            if (attention_mask != 1).any():
+                # only create mask if attention_mask is passed
+                # if following HF convention, mask is expected to have 1s in the valid tokens and 0s in the masked positions.
+                keep_positions = attention_mask.bool() # SDPA bool attn_mask semantics: True = keep, False = mask
+                attn_mask = keep_positions[:, None, None, :] # torch flash attention expects dims [B, H, Q, K]
+
+                need_causal = (kv_cache is None) or (start_position == 0 and sequence_length > 1)
+                if need_causal:
+                    q_pos = torch.arange(0, sequence_length, device=hidden_state.device)
+                    k_pos = torch.arange(0, k_length, device=hidden_state.device)
+                    causal_keep = (k_pos[None, :] <= q_pos[:, None])[None, None, :, :]  # (1,1,Q,K)
+                    attn_mask = attn_mask.expand(attn_mask.size(0), 1, sequence_length, k_length) & causal_keep
+
+                attn_mask = attn_mask.contiguous()
+
+        for layer_id, layer in enumerate(self.layers):
+            layer_k_cache = None
+            layer_v_cache = None
+            if kv_cache is not None:
+                layer_k_cache = kv_cache.keys[layer_id]
+                layer_v_cache = kv_cache.values[layer_id]
+
+            hidden_state = layer(
+                hidden_state,
+                rope_freqs,
+                attn_mask,
+                layer_k_cache=layer_k_cache,
+                layer_v_cache=layer_v_cache,
+                start_position=start_position
+            )
+
+        hidden_state = self.norm(hidden_state)
+
+        logits = self.output(hidden_state)
+
+        loss = None
+        if labels is not None:
+            if labels.device != hidden_state.device:
+                labels = labels.to(hidden_state.device)
+            flat_logits = logits.view(-1, logits.size(-1))  # (batch_size * sequence_length, num_classes)
+            flat_labels = labels.view(-1)  # (batch_size * sequence_length)
+            loss = nn.CrossEntropyLoss(ignore_index=self.ignore_index)(flat_logits, flat_labels)
+
+        return {'logits': logits, 'loss': loss, 'kv_cache': kv_cache}
